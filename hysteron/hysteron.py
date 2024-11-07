@@ -42,6 +42,8 @@ _Recorder_spec = [
     ('_data', numba.float64[:,:]),
     ('enable_record', numba.boolean),
     ('N', numba.int64),
+    ('is_reach_limit_cycle', numba.boolean),
+    ('limit_cycle_start_index', numba.int64),
 ]
 
 @numba.experimental.jitclass(_Recorder_spec)
@@ -58,6 +60,8 @@ class Recorder(object):
             self.enable_record = True
             self._data = np.empty((0, N*2 + 1))
         self.N = N
+        self.is_reach_limit_cycle = False
+        self.limit_cycle_start_index = 0
         
     @property
     def data(self):
@@ -74,9 +78,20 @@ class Recorder(object):
         r[0, (self.N + 1):(2*self.N + 1)
                   ] = local_field
         self._data = np.concatenate((self._data, r), axis=0)
+        if self.N > 0:
+            self.is_loop_closed()
+
+    def is_loop_closed(self) -> tuple:
+        """check if the loop is closed and the simulation reach the limit cycle."""
+        last = self.data[-1]
+        for i in range(len(self.data) - 1):
+            if np.all(self.data[i] == last):
+                self.is_reach_limit_cycle = True
+                self.limit_cycle_start_index = i
+                break
 
 
-@numba.njit
+# @numba.njit
 def evolve_event(state, H_target, rising, interactions, Hon, Hoff, 
                  recorder, debug=False, find_next_flip=False):
     """Portion of an event-based simulation that changes field to H_target.
@@ -117,7 +132,7 @@ def evolve_event(state, H_target, rising, interactions, Hon, Hoff,
         # "dist" = abs(field required to flip each hysteron)
         if rising:
             dist = Hon - inter_field
-            flippable = state < 0
+            flippable = state < 1
         else:
             dist = inter_field - Hoff
             flippable = state > 0
@@ -162,6 +177,7 @@ def evolve_event(state, H_target, rising, interactions, Hon, Hoff,
             else:
                 # Actually change the hysteron
                 state[to_flip] = 1
+                recorder.record(state, H_flip, interactions)
         else:
             H_flip = -dist[to_flip]
             if H_flip < H_target:
@@ -172,8 +188,8 @@ def evolve_event(state, H_target, rising, interactions, Hon, Hoff,
                 return H_flip
             else:
                 # Actually change the hysteron
-                state[to_flip] = -1
-            
+                state[to_flip] = 0 #-1
+                recorder.record(state, H_flip, interactions)
         if debug: print('H_flip', H_flip, H_target)
         if debug: print('state_temp', state)
         
@@ -190,7 +206,7 @@ def evolve_event(state, H_target, rising, interactions, Hon, Hoff,
             raise StabilityError('Simulation got stuck')
 
 
-@numba.njit
+# @numba.njit
 def stabilize_event(state, H, interactions, Hon, Hoff, recorder):
     """Find a stable state, holding magnetic field fixed.
     """
@@ -203,7 +219,7 @@ def stabilize_event(state, H, interactions, Hon, Hoff, recorder):
         
         # Compute instability metric
         for i in range(N):
-            if state[i] < 0 and local_field[i] >= Hon[i]:
+            if state[i] < 1 and local_field[i] >= Hon[i]:
                 instability[i] = local_field[i] - Hon[i]
             elif state[i] > 0 and local_field[i] <= Hoff[i]:
                 instability[i] = Hoff[i] - local_field[i]
@@ -227,16 +243,21 @@ def stabilize_event(state, H, interactions, Hon, Hoff, recorder):
         if instability[i_max] > 0:
             recorder.record(state, H, interactions)
             if state[i_max] > 0:
-                state[i_max] = -1
+                state[i_max] = 0 #-1
             else:
                 state[i_max] = 1
+            # Record the new state after flipping
+            recorder.record(state, H, interactions)
         else:
             return inter_field
     else:
         raise StabilityError("Couldn't find a stable state")
         
         
-@numba.njit(locals={'_recorder': numba.typeof(Recorder(0))})
+
+
+
+# @numba.njit(locals={'_recorder': numba.typeof(Recorder(0))})
 def run_event_extended_fast(state, interactions, Hon, Hoff, amplitude, recorder=None,
                        H_init=-np.inf, debug=False,
                        terminate_on_repeat=True):
@@ -250,37 +271,44 @@ def run_event_extended_fast(state, interactions, Hon, Hoff, amplitude, recorder=
     else:
         _recorder = recorder
     
-    max_cycles = 2**len(Hon) + 1
-    history = np.empty((max_cycles + 1, len(state)), dtype=state.dtype)
+    max_cycles = 100000 #min(2**len(Hon), 100000)
+    history = [] #np.empty((max_cycles + 1, len(state)), dtype=state.dtype)
     periodicity = 0  # Means no periodicity found
     
     # Initialize by bringing field to zero 
     # ("outer hysteresis loop")
     stabilize_event(state, H_init, interactions, Hon, Hoff, _recorder)
-    if H_init < 0:
-        evolve_event(state, 0, 1, interactions, Hon, Hoff, _recorder, debug=debug, find_next_flip=False)
-    else:
+    if H_init > 0:
         evolve_event(state, 0, 0, interactions, Hon, Hoff, _recorder, debug=debug, find_next_flip=False)
-    history[0, :] = state
+    else:
+        evolve_event(state, 0, 1, interactions, Hon, Hoff, _recorder, debug=debug, find_next_flip=False)
+    history.append(state)
     
+    idx = 0
     for i in range(max_cycles):
-        if not (i == 0 and H_init > 0):
-            evolve_event(state, amplitude, 1, interactions, Hon, Hoff, 
-                         _recorder, debug=debug, find_next_flip=False)
-        evolve_event(state, -amplitude, 0, interactions, Hon, Hoff, 
+        # if not (i == 0 and H_init > 0):
+        evolve_event(state, amplitude, 1, interactions, Hon, Hoff, 
+                        _recorder, debug=debug, find_next_flip=False)
+        evolve_event(state, 0.0, 0, interactions, Hon, Hoff, 
                      _recorder, debug=debug, find_next_flip=False)
-        evolve_event(state, 0.0, 1, interactions, Hon, Hoff, _recorder,
-                     debug=debug, find_next_flip=False)
-        history[i + 1, :] = state
+        # evolve_event(state, amplitude, 1, interactions, Hon, Hoff, _recorder,
+        #              debug=debug, find_next_flip=False)
+        history.append(state)
+
+        if _recorder.is_reach_limit_cycle:
+            print(f'limit cycle reached at idx: {_recorder.limit_cycle_start_index}')
+            break
         
         # Check for a repeat
-        if periodicity == 0:
-            for t in range(i + 1):
-                if np.all(state == history[t, :]):
-                    periodicity = i + 1 - t
-                    if terminate_on_repeat:
-                        return periodicity
-    
+        # if periodicity == 0:
+        for t in range(i + 1):
+            if np.all(state == history[t]):
+                periodicity = i + 1 - t
+                # if terminate_on_repeat:
+                #     if recorder.is_reach_limit_cycle:
+                #         break   
+        idx = i 
+    print(f"Finished at {idx}, max cycle: {max_cycles}")
     return periodicity
 
 
