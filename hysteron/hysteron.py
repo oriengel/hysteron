@@ -46,7 +46,7 @@ _Recorder_spec = [
     ('limit_cycle_start_index', numba.int64),
 ]
 
-@numba.experimental.jitclass(_Recorder_spec)
+#@numba.experimental.jitclass(_Recorder_spec)
 class Recorder(object):
     def __init__(self, N=0):
         """Class to hold data captured during a simulation run.
@@ -78,8 +78,8 @@ class Recorder(object):
         r[0, (self.N + 1):(2*self.N + 1)
                   ] = local_field
         self._data = np.concatenate((self._data, r), axis=0)
-        if self.N > 0:
-            self.is_loop_closed()
+        # if self.N > 0:
+        #     self.is_loop_closed()
 
     def is_loop_closed(self) -> tuple:
         """check if the loop is closed and the simulation reach the limit cycle."""
@@ -88,10 +88,11 @@ class Recorder(object):
             if np.all(self.data[i] == last):
                 self.is_reach_limit_cycle = True
                 self.limit_cycle_start_index = i
-                break
+                return True, i
+        return False, 0
 
 
-# @numba.njit
+#@numba.njit
 def evolve_event(state, H_target, rising, interactions, Hon, Hoff, 
                  recorder, debug=False, find_next_flip=False):
     """Portion of an event-based simulation that changes field to H_target.
@@ -206,7 +207,7 @@ def evolve_event(state, H_target, rising, interactions, Hon, Hoff,
             raise StabilityError('Simulation got stuck')
 
 
-# @numba.njit
+#@numba.njit
 def stabilize_event(state, H, interactions, Hon, Hoff, recorder):
     """Find a stable state, holding magnetic field fixed.
     """
@@ -257,9 +258,9 @@ def stabilize_event(state, H, interactions, Hon, Hoff, recorder):
 
 
 
-# @numba.njit(locals={'_recorder': numba.typeof(Recorder(0))})
-def run_event_extended_fast(state, interactions, Hon, Hoff, amplitude, recorder=None,
-                       H_init=-np.inf, debug=False,
+#@numba.njit(locals={'_recorder': numba.typeof(Recorder(0))})
+def run_event_extended_fast(state, interactions, Hon, Hoff, amplitude, low_amplitude=0, recorder=None,
+                       H_init=0, debug=False,
                        terminate_on_repeat=True):
     """Stripped-down, numba-only version of run_event_extended().
     
@@ -277,11 +278,11 @@ def run_event_extended_fast(state, interactions, Hon, Hoff, amplitude, recorder=
     
     # Initialize by bringing field to zero 
     # ("outer hysteresis loop")
-    stabilize_event(state, H_init, interactions, Hon, Hoff, _recorder)
-    if H_init > 0:
-        evolve_event(state, 0, 0, interactions, Hon, Hoff, _recorder, debug=debug, find_next_flip=False)
+    stabilize_event(state, H_init, interactions, Hon, Hoff, Recorder(0))
+    if H_init > low_amplitude:
+        evolve_event(state, H_init, 0, interactions, Hon, Hoff, _recorder, debug=debug, find_next_flip=False)
     else:
-        evolve_event(state, 0, 1, interactions, Hon, Hoff, _recorder, debug=debug, find_next_flip=False)
+        evolve_event(state, H_init, 1, interactions, Hon, Hoff, _recorder, debug=debug, find_next_flip=False)
     history.append(state)
     
     idx = 0
@@ -289,11 +290,12 @@ def run_event_extended_fast(state, interactions, Hon, Hoff, amplitude, recorder=
         # if not (i == 0 and H_init > 0):
         evolve_event(state, amplitude, 1, interactions, Hon, Hoff, 
                         _recorder, debug=debug, find_next_flip=False)
-        evolve_event(state, 0.0, 0, interactions, Hon, Hoff, 
+        evolve_event(state, low_amplitude, 0, interactions, Hon, Hoff, 
                      _recorder, debug=debug, find_next_flip=False)
         # evolve_event(state, amplitude, 1, interactions, Hon, Hoff, _recorder,
         #              debug=debug, find_next_flip=False)
         history.append(state)
+        is_reach_limit_cycle, limit_cycle_start_index = _recorder.is_loop_closed()
 
         if _recorder.is_reach_limit_cycle:
             print(f'limit cycle reached at idx: {_recorder.limit_cycle_start_index}')
@@ -312,7 +314,7 @@ def run_event_extended_fast(state, interactions, Hon, Hoff, amplitude, recorder=
     return periodicity
 
 
-def run_event_extended(state, interactions, Hon, Hoff, amplitude, 
+def run_event_extended(state, interactions, Hon, Hoff, amplitude, low_amplitude=0.0,
                        recorder=None,
                        H_init=-np.inf, debug=False,
                        terminate_on_repeat=True):
@@ -339,7 +341,7 @@ def run_event_extended(state, interactions, Hon, Hoff, amplitude,
     Returns the observed period of the limit cycle.
     """
     return run_event_extended_fast(state, interactions, 
-                                   Hon, Hoff, amplitude, 
+                                   Hon, Hoff, amplitude, low_amplitude=low_amplitude, 
                                    recorder=recorder,
                                    H_init=H_init, debug=debug,
                                    terminate_on_repeat=terminate_on_repeat)
@@ -365,13 +367,13 @@ def try_params(interactions, Hon, Hoff, amplitude=1.0, debug=False):
     return periodicity
 
 
-@numba.njit
+#@numba.njit
 def uniform(a, b, N=1):
     """N numbers in a uniform distribution between a and b."""
     return np.random.random(N) * (b - a) + a
 
 
-@numba.njit
+#@numba.njit
 def uniform1(a, b):
     """One number in a uniform distribution between a and b."""
     return np.random.random() * (b - a) + a
@@ -393,7 +395,7 @@ def states_from_traces(traces, N, shorten=True):
         return state_trajectory
     
     
-@numba.njit
+#@numba.njit
 def _unique_finite(values):
     """Obtain the set of finite, unique values from "values".
     
@@ -424,7 +426,7 @@ def compute_possible_states(N):
                                                        repeat=N)])
 
 
-@numba.njit
+#@numba.njit
 def possible_amplitudes(interactions, Hon, Hoff, possible_states):
     """Return the set of distinctive field amplitudes for a system.
     
@@ -451,7 +453,7 @@ def possible_amplitudes(interactions, Hon, Hoff, possible_states):
     return (H_flips[1:] + H_flips[:-1]) / 2
 
 
-@numba.jit(nopython=True)
+#@numba.jit(nopython=True)
 def amplitude_sweep(interactions, Hon, Hoff, possible_states):
     """Find the minimum amplitude that causes period > 1.
     
